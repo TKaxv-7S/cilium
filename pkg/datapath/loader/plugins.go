@@ -24,6 +24,7 @@ import (
 	"github.com/cilium/cilium/pkg/bpf/analyze"
 	"github.com/cilium/cilium/pkg/datapath/config"
 	plugin "github.com/cilium/cilium/pkg/datapath/plugins/types"
+	endpoint "github.com/cilium/cilium/pkg/endpoint/types"
 	api_v2alpha1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
@@ -35,6 +36,23 @@ import (
 const (
 	bpfLoaderGCRetryInterval = time.Minute
 )
+
+func attachmentContextLXC(ep endpoint.Endpoint) *datapathplugins.AttachmentContext {
+	return &datapathplugins.AttachmentContext{
+		Context: &datapathplugins.AttachmentContext_Lxc{
+			Lxc: &datapathplugins.AttachmentContext_LXC{
+				Iface: &datapathplugins.AttachmentContext_InterfaceInfo{
+					Name: ep.InterfaceName(),
+				},
+				PodInfo: &datapathplugins.AttachmentContext_PodInfo{
+					Namespace:     ep.GetK8sNamespace(),
+					Name:          ep.GetK8sPodName(),
+					ContainerName: ep.GetContainerName(),
+				},
+			},
+		},
+	}
+}
 
 // bpfCollectionLoader coordinates between datapath plugins when loading a BPF
 // collection. It provides an interface similar to the usual bpf.Load and
