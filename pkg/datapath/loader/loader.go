@@ -48,11 +48,12 @@ type loader struct {
 	hostDpInitializedOnce sync.Once
 	hostDpInitialized     chan struct{}
 
-	sysctl             sysctl.Sysctl
-	prefilter          prefilter.PreFilter
-	compilationLock    types.CompilationLock
-	configWriter       config.Writer
-	nodeConfigNotifier *manager.NodeConfigNotifier
+	sysctl              sysctl.Sysctl
+	prefilter           prefilter.PreFilter
+	compilationLock     types.CompilationLock
+	configWriter        config.Writer
+	nodeConfigNotifier  *manager.NodeConfigNotifier
+	bpfCollectionLoader *bpfCollectionLoader
 
 	db           *statedb.DB
 	devices      statedb.Table[*tables.Device]
@@ -94,6 +95,10 @@ func newLoader(p Params) *loader {
 		configWriter:       p.ConfigWriter,
 		nodeConfigNotifier: p.NodeConfigNotifier,
 		routeManager:       p.RouteManager,
+		bpfCollectionLoader: newBPFCollectionLoader(
+			option.Config.EnableDatapathPlugins,
+			bpffsPluginsOperationsDir(bpf.CiliumPath()),
+		),
 
 		db:      p.DB,
 		devices: p.Devices,

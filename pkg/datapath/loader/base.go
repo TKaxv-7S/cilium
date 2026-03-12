@@ -305,6 +305,10 @@ func (l *loader) Reinitialize(ctx context.Context, lnc *config.Config, tunnelCon
 		return fmt.Errorf("failed to create bpffs directory: %w", err)
 	}
 
+	if err := l.initializePluginsDir(); err != nil {
+		return fmt.Errorf("initializing plugins bpffs directories: %w", err)
+	}
+
 	// Datapath initialization
 	hostDev1, _, err := setupBaseDevice(l.logger, l.sysctl, lnc.DeviceMTU)
 	if err != nil {
