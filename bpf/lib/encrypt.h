@@ -63,6 +63,52 @@ strict_allow(struct __ctx_buff *ctx, __be16 proto) {
 }
 #endif /* ENCRYPTION_STRICT_MODE_EGRESS */
 
+/* strict_ingress_drop checks whether a packet must be dropped by strict
+ * ingress encryption enforcement. It returns true for cluster-internal pod
+ * traffic that reached a local pod without going through the WireGuard decrypt
+ * path. Legitimate decrypted traffic is delivered directly from
+ * bpf_wireguard.c (BPF host routing) or returns to the stack with
+ * MARK_MAGIC_DECRYPT set, neither of which re-enters bpf_host from a netdev.
+ *
+ * Callers are responsible for gating this on ENABLE_WIREGUARD and the
+ * encryption_strict_ingress / enable_identity_mark configuration.
+ */
+static __always_inline bool
+strict_ingress_drop(struct __ctx_buff *ctx, __u32 secctx, bool from_host,
+		    const struct endpoint_info *ep)
+{
+	/* Traffic that entered from the local host stack is fine. */
+	if (from_host)
+		return false;
+
+	/* Already-decrypted traffic is fine. */
+	if (ctx_is_decrypt(ctx))
+		return false;
+
+	/* Only enforce on cluster-internal traffic. */
+	if (!identity_is_cluster(secctx))
+		return false;
+
+	/* Traffic from a remote node is not pod traffic. */
+	if (identity_is_remote_node(secctx))
+		return false;
+
+	/* Traffic with a host source identity is not pod traffic. Unlike the
+	 * from_host check above, this matches on the source identity regardless
+	 * of which path the packet entered through.
+	 */
+	if (identity_is_host(secctx))
+		return false;
+
+	/* Only enforce on delivery to a local pod: skip traffic not destined for
+	 * a local endpoint, or destined for the local host.
+	 */
+	if (!ep || (ep->flags & ENDPOINT_MASK_HOST_DELIVERY))
+		return false;
+
+	return true;
+}
+
 /* checks whether the source endpoint matches the encryption policy */
 static __always_inline bool
 encrypt_src_matches_policy(__u32 src_sec_identity) {

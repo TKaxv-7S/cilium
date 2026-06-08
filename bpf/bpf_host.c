@@ -329,14 +329,20 @@ handle_ipv6_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 	}
 #endif /* ENABLE_SRV6 */
 
+	/* Lookup IPv6 address in list of local endpoints */
+	ep = lookup_ip6_endpoint(ip6);
+
+	if (is_defined(ENABLE_WIREGUARD) && CONFIG(enable_identity_mark) &&
+	    CONFIG(encryption_strict_ingress) &&
+	    strict_ingress_drop(ctx, secctx, from_host, ep))
+		return DROP_UNENCRYPTED_TRAFFIC;
+
 #ifndef ENABLE_HOST_ROUTING
 	/* See the equivalent v4 path for comments */
 	if (!from_host)
 		return CTX_ACT_OK;
 #endif /* !ENABLE_HOST_ROUTING */
 
-	/* Lookup IPv6 address in list of local endpoints */
-	ep = lookup_ip6_endpoint(ip6);
 	if (ep) {
 		/* Let through packets to the node-ip so they are
 		 * processed by the local ip stack.
@@ -735,6 +741,14 @@ handle_ipv4_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 	}
 #endif /* ENABLE_HOST_FIREWALL */
 
+	/* Lookup IPv4 address in list of local endpoints and host IPs */
+	ep = lookup_ip4_endpoint(ip4);
+
+	if (is_defined(ENABLE_WIREGUARD) && CONFIG(enable_identity_mark) &&
+	    CONFIG(encryption_strict_ingress) &&
+	    strict_ingress_drop(ctx, secctx, from_host, ep))
+		return DROP_UNENCRYPTED_TRAFFIC;
+
 #ifndef ENABLE_HOST_ROUTING
 	/* Without bpf_redirect_neigh() helper, we cannot redirect a
 	 * packet to a local endpoint in the direct routing mode, as
@@ -749,8 +763,6 @@ handle_ipv4_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 		return CTX_ACT_OK;
 #endif /* !ENABLE_HOST_ROUTING */
 
-	/* Lookup IPv4 address in list of local endpoints and host IPs */
-	ep = lookup_ip4_endpoint(ip4);
 	if (ep) {
 		int l3_off = ETH_HLEN;
 

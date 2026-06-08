@@ -73,5 +73,13 @@ Encryption strict mode egress has the following limitations:
   ``true``. This allows unencrypted traffic sent from or to an IP address
   associated with a node identity.
 
+Encryption strict mode ingress can be enabled via
+``encryption.strictMode.ingress.enabled``. When enabled, any cluster-internal
+ingress traffic that did not arrive on the node through the WireGuard tunnel
+is dropped, preventing spoofed or unencrypted pod traffic from reaching local
+endpoints. Strict mode ingress is supported with both tunnel and native
+routing modes, and requires WireGuard encryption (it is not supported with
+IPsec).
+
 Encryption strict mode ingress is currently not supported when chaining Cilium
 on top of other CNI plugins. For more information, see GitHub issue 15596.
