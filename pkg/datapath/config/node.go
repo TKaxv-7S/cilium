@@ -87,5 +87,7 @@ func NodeConfig(lnc *Config) Node {
 
 	node.EnableIdentityMark = option.Config.EnableIdentityMark
 
+	node.EncryptionStrictIngress = option.Config.EnableEncryptionStrictModeIngress
+
 	return node
 }
