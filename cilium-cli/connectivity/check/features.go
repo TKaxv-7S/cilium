@@ -53,6 +53,7 @@ type DaemonConfigForFeatDetection struct {
 	NodeEncryptionOptOutLabelsString string
 	EnableK8sNetworkPolicy           bool
 	EnableK8sClusterNetworkPolicy    bool
+	EnableIdentityMark               bool
 }
 
 // extractFeaturesFromRuntimeConfig extracts features from the Cilium runtime config.
@@ -98,6 +99,10 @@ func (ct *ConnectivityTest) extractFeaturesFromRuntimeConfig(ctx context.Context
 
 	result[features.KCNP] = features.Status{
 		Enabled: cfg.EnableK8sClusterNetworkPolicy,
+	}
+
+	result[features.EnableIdentityMark] = features.Status{
+		Enabled: cfg.EnableIdentityMark,
 	}
 	return nil
 }

@@ -128,6 +128,8 @@ const (
 	Ztunnel Feature = "enable-ztunnel"
 
 	DefaultGlobalNamespace Feature = "clustermesh-default-global-namespace"
+
+	EnableIdentityMark Feature = "enable-identity-mark"
 )
 
 // Feature is the name of a Cilium Feature (e.g. l7-proxy, cni chaining mode etc)
