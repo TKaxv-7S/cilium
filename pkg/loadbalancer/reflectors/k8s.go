@@ -282,10 +282,27 @@ func runServiceEndpointsReflector(ctx context.Context, health cell.Health, p ref
 		}
 	}
 
-	currentEndpoints := map[string]endpointsEvent{}
+	type endpointSource struct {
+		source    source.Source
+		clusterID uint32
+	}
+
+	currentEndpointsBySource := map[endpointSource]map[string]endpointsEvent{}
 	processEndpointsEvent := func(txn writer.WriteTxn, key bufferKey, val bufferValue) {
+		endpointSource := endpointSource{
+			source:    key.source,
+			clusterID: key.clusterID,
+		}
+		currentEndpoints := currentEndpointsBySource[endpointSource]
+
 		switch val.kind {
 		case resource.Sync:
+			if endpointSource.source != source.Kubernetes || endpointSource.clusterID != writer.LocalClusterID {
+				panic(fmt.Sprintf("BUG: unexpected endpoint replacement should only be from the local cluster "+
+					"with a Kubernetes source, whereas it's currently from from source %q and cluster %d",
+					endpointSource.source, endpointSource.clusterID))
+			}
+
 			// Gather known service names to refresh frontends since DeleteBackendsBySource
 			// does not refresh.
 			servicesToRefresh := sets.New[loadbalancer.ServiceName]()
@@ -304,12 +321,13 @@ func runServiceEndpointsReflector(ctx context.Context, health cell.Health, p ref
 							l4Addr.Port,
 							loadbalancer.ScopeExternal))
 					}
-					if err := p.Writer.DeleteBackendsByAddress(txn, ev.svcName, slices.Values(addrs)); err != nil {
+					if err := p.Writer.DeleteBackendsByAddress(txn, ev.svcName, endpointSource.source, endpointSource.clusterID, slices.Values(addrs)); err != nil {
 						p.Log.Error("BUG: Unexpected failure to delete backends", logfields.Error, err)
 					}
 				}
 			}
-			clear(currentEndpoints)
+			delete(currentEndpointsBySource, endpointSource)
+			currentEndpoints = nil
 
 			// Insert the replacements
 			for _, eps := range val.endpointsReplace {
@@ -321,12 +339,16 @@ func runServiceEndpointsReflector(ctx context.Context, health cell.Health, p ref
 				// Convert [k8s.Endpoints] to [loadbalancer.Backend]
 				backends := convertEndpoints(p.Log, p.ExtConfig, name, maps.All(eps.Backends))
 
-				err := p.Writer.UpsertBackends(txn, name, source.Kubernetes, backends)
+				err := p.Writer.UpsertBackends(txn, name, endpointSource.source, endpointSource.clusterID, backends)
 				rh.update("eps:"+name.String(), err)
 				if err != nil {
 					continue
 				}
 
+				if currentEndpoints == nil {
+					currentEndpoints = map[string]endpointsEvent{}
+					currentEndpointsBySource[endpointSource] = currentEndpoints
+				}
 				currentEndpoints[eps.EndpointSliceName] = endpointsEvent{
 					name:     eps.EndpointSliceName,
 					svcName:  name,
@@ -383,7 +405,7 @@ func runServiceEndpointsReflector(ctx context.Context, health cell.Health, p ref
 				}
 			}
 
-			err = p.Writer.UpsertAndReleaseBackends(txn, name, source.Kubernetes, backends, orphans)
+			err = p.Writer.UpsertAndReleaseBackends(txn, name, endpointSource.source, endpointSource.clusterID, backends, orphans)
 			if err != nil {
 				rh.update("eps:"+name.String(), err)
 				return
@@ -393,6 +415,10 @@ func runServiceEndpointsReflector(ctx context.Context, health cell.Health, p ref
 				if len(ep.backends) == 0 {
 					delete(currentEndpoints, ep.name)
 				} else {
+					if currentEndpoints == nil {
+						currentEndpoints = map[string]endpointsEvent{}
+						currentEndpointsBySource[endpointSource] = currentEndpoints
+					}
 					ep.svcName = name
 					currentEndpoints[ep.name] = ep
 				}
@@ -453,8 +479,10 @@ func runServiceEndpointsReflector(ctx context.Context, health cell.Health, p ref
 }
 
 type bufferKey struct {
-	key   resource.Key
-	isSvc bool
+	key       resource.Key
+	isSvc     bool
+	source    source.Source
+	clusterID uint32
 }
 
 type bufferValue struct {
@@ -535,22 +563,24 @@ func bufferInsert(buf buffer, ev event) buffer {
 	switch ev := ev.(type) {
 	case upsertServiceEvent:
 		key := bufferKey{
-			resource.Key{Name: ev.obj.Name, Namespace: ev.obj.Namespace},
-			true,
+			key:   resource.Key{Name: ev.obj.Name, Namespace: ev.obj.Namespace},
+			isSvc: true,
 		}
 		buf.Insert(key, bufferValue{kind: resource.Upsert, svc: ev.obj})
 	case deleteServiceEvent:
 		key := bufferKey{
-			resource.Key{Name: ev.obj.Name, Namespace: ev.obj.Namespace},
-			true,
+			key:   resource.Key{Name: ev.obj.Name, Namespace: ev.obj.Namespace},
+			isSvc: true,
 		}
 		buf.Insert(key, bufferValue{kind: resource.Delete, svc: ev.obj})
 	case replaceServicesEvent:
 		buf.Insert(bufferKey{isSvc: true}, bufferValue{kind: resource.Sync, servicesReplace: ev.objs})
 	case upsertEndpointEvent:
 		key := bufferKey{
-			resource.Key{Name: ev.obj.ServiceName.Name(), Namespace: ev.obj.ServiceName.Namespace()},
-			false,
+			key:       resource.Key{Name: ev.obj.ServiceName.Name(), Namespace: ev.obj.ServiceName.Namespace()},
+			isSvc:     false,
+			source:    ev.source,
+			clusterID: ev.clusterID,
 		}
 		var allEps allEndpoints
 		if old, ok := buf.Get(key); ok {
@@ -563,8 +593,10 @@ func bufferInsert(buf buffer, ev event) buffer {
 		})
 	case deleteEndpointEvent:
 		key := bufferKey{
-			resource.Key{Name: ev.obj.ServiceName.Name(), Namespace: ev.obj.ServiceName.Namespace()},
-			false,
+			key:       resource.Key{Name: ev.obj.ServiceName.Name(), Namespace: ev.obj.ServiceName.Namespace()},
+			isSvc:     false,
+			source:    ev.source,
+			clusterID: ev.clusterID,
 		}
 		var allEps allEndpoints
 		if old, ok := buf.Get(key); ok {
@@ -578,7 +610,7 @@ func bufferInsert(buf buffer, ev event) buffer {
 			allEndpoints: allEps,
 		})
 	case replaceEndpointsEvent:
-		buf.Insert(bufferKey{isSvc: false}, bufferValue{kind: resource.Sync, endpointsReplace: ev.objs})
+		buf.Insert(bufferKey{isSvc: false, source: ev.source, clusterID: ev.clusterID}, bufferValue{kind: resource.Sync, endpointsReplace: ev.objs})
 	default:
 		panic(fmt.Sprintf("unexpected reflectors.event: %#v", ev))
 	}
@@ -860,19 +892,25 @@ type replaceServicesEvent struct {
 func (replaceServicesEvent) isEvent() {}
 
 type upsertEndpointEvent struct {
-	obj *k8s.Endpoints
+	source    source.Source
+	clusterID uint32
+	obj       *k8s.Endpoints
 }
 
 func (upsertEndpointEvent) isEvent() {}
 
 type deleteEndpointEvent struct {
-	obj *k8s.Endpoints
+	source    source.Source
+	clusterID uint32
+	obj       *k8s.Endpoints
 }
 
 func (deleteEndpointEvent) isEvent() {}
 
 type replaceEndpointsEvent struct {
-	objs []*k8s.Endpoints
+	source    source.Source
+	clusterID uint32
+	objs      []*k8s.Endpoints
 }
 
 func (replaceEndpointsEvent) isEvent() {}
@@ -895,17 +933,17 @@ func endpointsEvents(log *slog.Logger, c client.Clientset, cfg k8s.ConfigParams)
 				for i := range objs {
 					objs[i] = k8s.ParseEndpointSliceV1(log, raw[i].(*slim_discoveryv1.EndpointSlice))
 				}
-				return replaceEndpointsEvent{objs: objs}
+				return replaceEndpointsEvent{source: source.Kubernetes, clusterID: writer.LocalClusterID, objs: objs}
 			}
 			obj := ev.Obj.(*slim_discoveryv1.EndpointSlice)
 			eps := k8s.ParseEndpointSliceV1(log, obj)
 			switch ev.Kind {
 			case k8s.CacheStoreEventAdd:
-				return upsertEndpointEvent{eps}
+				return upsertEndpointEvent{source: source.Kubernetes, clusterID: writer.LocalClusterID, obj: eps}
 			case k8s.CacheStoreEventUpdate:
-				return upsertEndpointEvent{eps}
+				return upsertEndpointEvent{source: source.Kubernetes, clusterID: writer.LocalClusterID, obj: eps}
 			case k8s.CacheStoreEventDelete:
-				return deleteEndpointEvent{eps}
+				return deleteEndpointEvent{source: source.Kubernetes, clusterID: writer.LocalClusterID, obj: eps}
 			default:
 				panic(fmt.Sprintf("unexpected k8s.CacheStoreEventKind: %#v", ev.Kind))
 			}
@@ -966,13 +1004,13 @@ func newEventStream(log *slog.Logger, cs client.Clientset, cfg k8s.ConfigParams)
 func EventStreamForBenchmark(eps <-chan resource.Event[*k8s.Endpoints], svcs <-chan resource.Event[*slim_corev1.Service]) stream.Observable[event] {
 	return joinObservables(
 		stream.Concat(
-			stream.Just[event](replaceEndpointsEvent{}),
+			stream.Just[event](replaceEndpointsEvent{source: source.Kubernetes, clusterID: writer.LocalClusterID}),
 			stream.Map(stream.FromChannel(eps),
 				func(ev resource.Event[*k8s.Endpoints]) event {
 					if ev.Kind == resource.Delete {
-						return deleteEndpointEvent{ev.Object}
+						return deleteEndpointEvent{source: source.Kubernetes, clusterID: writer.LocalClusterID, obj: ev.Object}
 					}
-					return upsertEndpointEvent{ev.Object}
+					return upsertEndpointEvent{source: source.Kubernetes, clusterID: writer.LocalClusterID, obj: ev.Object}
 				})),
 
 		stream.Concat(
