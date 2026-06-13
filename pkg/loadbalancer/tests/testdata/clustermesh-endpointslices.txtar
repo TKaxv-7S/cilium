@@ -1,0 +1,168 @@
+#! --lb-test-fault-probability=0.0 --cluster-id=1 --cluster-name=cluster1
+
+# Start the test application.
+hive start
+
+# Add the local service and local endpooints
+k8s/add service.yaml endpointslice.yaml
+db/cmp services services.table
+db/cmp backends backends-local.table
+db/cmp frontends frontends-local.table
+
+# Add remote endpoints from two clusters
+kvstore/update cilium/state/endpointslices/v1/cluster2/test/echo-slice clustermesh-endpointslice-cluster2.json
+kvstore/update cilium/state/endpointslices/v1/cluster3/test/echo-slice clustermesh-endpointslice-cluster3.json
+db/cmp backends backends-all.table
+db/cmp frontends frontends-all.table
+
+# Deleting cluster 2 endpoints
+kvstore/delete cilium/state/endpointslices/v1/cluster2/test/echo-slice
+db/cmp backends backends-local-and-cluster3.table
+db/cmp frontends frontends-local-and-cluster3.table
+
+# Deleting the local endpoints
+k8s/delete endpointslice.yaml
+db/cmp backends backends-cluster3.table
+db/cmp frontends frontends-cluster3.table
+
+# Cleanup
+kvstore/delete cilium/state/endpointslices/v1/cluster3/test/echo-slice
+k8s/delete service.yaml
+* db/empty services frontends backends
+* lb/maps-empty
+
+#####
+
+-- services.table --
+Name        Source   PortNames  TrafficPolicy
+test/echo   k8s      http=80    Cluster
+
+-- backends-local.table --
+Service    Address             Source  State   PortNames
+test/echo  10.244.1.1:80/TCP   k8s     active  http
+
+-- backends-all.table --
+Service    Address               Source       State   PortNames
+test/echo  10.244.1.1:80/TCP     k8s          active  http
+test/echo  10.244.1.1@2:80/TCP   clustermesh  active  http
+test/echo  10.244.1.1@3:80/TCP   clustermesh  active  http
+
+-- backends-local-and-cluster3.table --
+Service    Address               Source       State   PortNames
+test/echo  10.244.1.1:80/TCP     k8s          active  http
+test/echo  10.244.1.1@3:80/TCP   clustermesh  active  http
+
+-- backends-cluster3.table --
+Service    Address               Source       State   PortNames
+test/echo  10.244.1.1@3:80/TCP   clustermesh  active  http
+
+-- frontends-local.table --
+Address               ServiceName   Backends
+10.96.50.104:80/TCP   test/echo     10.244.1.1:80/TCP
+
+-- frontends-all.table --
+Address               ServiceName   Backends
+10.96.50.104:80/TCP   test/echo     10.244.1.1:80/TCP, 10.244.1.1@2:80/TCP, 10.244.1.1@3:80/TCP
+
+-- frontends-local-and-cluster3.table --
+Address               ServiceName   Backends
+10.96.50.104:80/TCP   test/echo     10.244.1.1:80/TCP, 10.244.1.1@3:80/TCP
+
+-- frontends-cluster3.table --
+Address               ServiceName   Backends
+10.96.50.104:80/TCP   test/echo     10.244.1.1@3:80/TCP
+
+-- service.yaml --
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    service.cilium.io/global: "true"
+  name: echo
+  namespace: test
+spec:
+  clusterIP: 10.96.50.104
+  clusterIPs:
+  - 10.96.50.104
+  ports:
+  - name: http
+    port: 80
+    protocol: TCP
+    targetPort: 80
+  selector:
+    name: echo
+  type: ClusterIP
+
+-- endpointslice.yaml --
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  labels:
+    kubernetes.io/service-name: echo
+  name: echo-slice
+  namespace: test
+addressType: IPv4
+endpoints:
+- addresses:
+  - 10.244.1.1
+  conditions:
+    ready: true
+    serving: true
+    terminating: false
+  nodeName: local-node
+ports:
+- name: http
+  port: 80
+  protocol: TCP
+
+-- clustermesh-endpointslice-cluster2.json --
+{
+  "cluster": "cluster2",
+  "clusterID": 2,
+  "namespace": "test",
+  "name": "echo-slice",
+  "labels": {
+    "kubernetes.io/service-name": "echo"
+  },
+  "addressType": "IPv4",
+  "endpoints": [{
+    "addresses": ["10.244.1.1"],
+    "conditions": {
+      "ready": true,
+      "serving": true,
+      "terminating": false
+    },
+    "nodeName": "remote-node-2"
+  }],
+  "ports": [{
+    "name": "http",
+    "port": 80,
+    "protocol": "TCP"
+  }]
+}
+
+-- clustermesh-endpointslice-cluster3.json --
+{
+  "cluster": "cluster3",
+  "clusterID": 3,
+  "namespace": "test",
+  "name": "echo-slice",
+  "labels": {
+    "kubernetes.io/service-name": "echo"
+  },
+  "addressType": "IPv4",
+  "endpoints": [{
+    "addresses": ["10.244.1.1"],
+    "conditions": {
+      "ready": true,
+      "serving": true,
+      "terminating": false
+    },
+    "nodeName": "remote-node-3"
+  }],
+  "ports": [{
+    "name": "http",
+    "port": 80,
+    "protocol": "TCP"
+  }]
+}

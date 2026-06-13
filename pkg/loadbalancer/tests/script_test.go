@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"maps"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -25,16 +26,27 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cilium/cilium/daemon/cmd/cni"
 	daemonk8s "github.com/cilium/cilium/daemon/k8s"
+	"github.com/cilium/cilium/pkg/allocator"
+	"github.com/cilium/cilium/pkg/clustermesh"
+	"github.com/cilium/cilium/pkg/clustermesh/clustercfg"
+	"github.com/cilium/cilium/pkg/clustermesh/common"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
+	"github.com/cilium/cilium/pkg/datapath/iptables/ipset"
 	"github.com/cilium/cilium/pkg/datapath/tables"
+	"github.com/cilium/cilium/pkg/dial"
 	envoyCfg "github.com/cilium/cilium/pkg/envoy/config"
 	"github.com/cilium/cilium/pkg/hive"
+	"github.com/cilium/cilium/pkg/identity/cache"
+	"github.com/cilium/cilium/pkg/ipcache"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client/testutils"
 	k8sTables "github.com/cilium/cilium/pkg/k8s/tables"
 	k8sTestutils "github.com/cilium/cilium/pkg/k8s/testutils"
 	"github.com/cilium/cilium/pkg/k8s/version"
 	"github.com/cilium/cilium/pkg/kpr"
+	"github.com/cilium/cilium/pkg/kvstore"
+	"github.com/cilium/cilium/pkg/kvstore/store"
 	"github.com/cilium/cilium/pkg/lbipamconfig"
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	lbcell "github.com/cilium/cilium/pkg/loadbalancer/cell"
@@ -45,6 +57,7 @@ import (
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/node/addressing"
+	nodemanager "github.com/cilium/cilium/pkg/node/manager"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/nodeipamconfig"
 	"github.com/cilium/cilium/pkg/option"
@@ -95,6 +108,8 @@ func testScript(t *testing.T) {
 				logging.SetLogLevel(slog.LevelDebug)
 			}
 			log := hivetest.Logger(t, opts...)
+			storeFactory := store.NewFactory(log, store.MetricsProvider())
+			configDir := t.TempDir()
 
 			h := hive.New(
 				k8sClient.FakeClientCell(),
@@ -112,7 +127,6 @@ func testScript(t *testing.T) {
 				nodeipamconfig.Cell,
 				node.LocalNodeStoreTestCell,
 				cell.Provide(
-					func() cmtypes.ClusterInfo { return cmtypes.ClusterInfo{} },
 					func(cfg loadbalancer.TestConfig) *loadbalancer.TestConfig { return &cfg },
 					tables.NewNodeAddressTable,
 					statedb.RWTable[tables.NodeAddress].ToTable,
@@ -134,12 +148,61 @@ func testScript(t *testing.T) {
 				),
 
 				lbcell.Cell,
+
+				// Cells needed for Cluster Mesh
+				cni.Cell,
+				ipset.Cell,
+				dial.ServiceResolverCell,
+				cell.Config(cmtypes.DefaultClusterInfo),
+				cell.Invoke(cmtypes.ClusterInfo.InitClusterIDMax, cmtypes.ClusterInfo.Validate),
+				cell.Provide(
+					func() store.Factory { return storeFactory },
+					func() clustermesh.ClusterMeshMetrics { return dummyClusterMeshMetrics{} },
+					func() clustermesh.RemoteIdentityWatcher { return dummyRemoteIdentityWatcher{} },
+					func(log *slog.Logger) nodemanager.NodeManager { return dummyNodeManager{log} },
+					func() *ipcache.IPCache { return nil },
+				),
+				cell.Provide(func(db *statedb.DB) (kvstore.Client, uhive.ScriptCmdsOut) {
+					client := kvstore.NewInMemoryClient(db, "__all__")
+					return client, uhive.NewScriptCmds(kvstore.Commands(client))
+				}),
+				cell.DecorateAll(func(client kvstore.Client) common.RemoteClientFactoryFn {
+					// All clusters share the same underlying client.
+					return func(context.Context, *slog.Logger, string, kvstore.ExtraOptions) (kvstore.BackendOperations, chan error) {
+						errch := make(chan error)
+						close(errch)
+						return client, errch
+					}
+				}),
+				cell.Invoke(func(client kvstore.Client) {
+					clusterConfig := []byte("endpoints:\n- in-memory\n")
+					config1 := filepath.Join(configDir, "cluster1")
+					require.NoError(t, os.WriteFile(config1, clusterConfig, 0644), "Failed to write config file for cluster1")
+					config2 := filepath.Join(configDir, "cluster2")
+					require.NoError(t, os.WriteFile(config2, clusterConfig, 0644), "Failed to write config file for cluster2")
+					config3 := filepath.Join(configDir, "cluster3")
+					require.NoError(t, os.WriteFile(config3, clusterConfig, 0644), "Failed to write config file for cluster3")
+
+					for i, name := range []string{"cluster1", "cluster2", "cluster3"} {
+						config := cmtypes.CiliumClusterConfig{
+							ID: uint32(i + 1),
+							Capabilities: cmtypes.CiliumClusterConfigCapabilities{
+								MaxConnectedClusters:     255,
+								EndpointSlicesExportMode: cmtypes.EndpointSlicesExportModeEndpointSlicesOnly,
+							},
+						}
+						require.NoErrorf(t, clustercfg.Set(context.TODO(), name, config, client), "Failed to set cluster config for %s", name)
+					}
+				}),
+				clustermesh.Cell,
 			)
 
 			flags := pflag.NewFlagSet("", pflag.ContinueOnError)
 			h.RegisterFlags(flags)
 
 			// Set some defaults
+			flags.Set("clustermesh-config", configDir)
+			flags.Set("clustermesh-service-v2", string(cmtypes.ServiceV2OnlyEndpointSlice))
 			flags.Set("lb-retry-backoff-min", "10ms") // as we're doing fault injection we want
 			flags.Set("lb-retry-backoff-max", "10ms") // tiny backoffs
 			flags.Set("bpf-lb-maglev-table-size", "1021")
@@ -313,3 +376,87 @@ func (tc testCommands) initWait() script.Cmd {
 			return nil, tc.waitFn(s.Context())
 		})
 }
+
+type dummyNodeManager struct {
+	log *slog.Logger
+}
+
+// ClusterSizeDependantInterval implements manager.NodeManager.
+func (d dummyNodeManager) ClusterSizeDependantInterval(baseInterval time.Duration) time.Duration {
+	return time.Second
+}
+
+// Enqueue implements manager.NodeManager.
+func (d dummyNodeManager) Enqueue(*nodeTypes.Node) {
+	panic("unimplemented")
+}
+
+// GetNodeIdentities implements manager.NodeManager.
+func (d dummyNodeManager) GetNodeIdentities() []nodeTypes.Identity {
+	panic("unimplemented")
+}
+
+// GetNodes implements manager.NodeManager.
+func (d dummyNodeManager) GetNodes() map[nodeTypes.Identity]nodeTypes.Node {
+	panic("unimplemented")
+}
+
+// MeshNodeSync implements manager.NodeManager.
+func (d dummyNodeManager) MeshNodeSync() {
+	d.log.Debug("NodeManager.MeshNodeSync()")
+}
+
+// NodeDeleted implements manager.NodeManager.
+func (d dummyNodeManager) NodeDeleted(n nodeTypes.Node) {
+	panic("unimplemented")
+}
+
+// NodeSync implements manager.NodeManager.
+func (d dummyNodeManager) NodeSync() {
+	d.log.Debug("NodeManager.NodeSync()")
+}
+
+// NodeUpdated implements manager.NodeManager.
+func (d dummyNodeManager) NodeUpdated(n nodeTypes.Node) {
+	panic("unimplemented")
+}
+
+// Subscribe implements manager.NodeManager.
+func (d dummyNodeManager) Subscribe(node.Handler) {
+	panic("unimplemented")
+}
+
+// Unsubscribe implements manager.NodeManager.
+func (d dummyNodeManager) Unsubscribe(node.Handler) {
+	panic("unimplemented")
+}
+
+// SetPrefixClusterMutatorFn implements manager.NodeManager.
+func (d dummyNodeManager) SetPrefixClusterMutatorFn(mutator func(*nodeTypes.Node) []cmtypes.PrefixClusterOpts) {
+	panic("unimplemented")
+}
+
+var _ nodemanager.NodeManager = dummyNodeManager{}
+
+type dummyRemoteIdentityWatcher struct{}
+
+// RemoveRemoteIdentities implements clustermesh.RemoteIdentityWatcher.
+func (d dummyRemoteIdentityWatcher) RemoveRemoteIdentities(name string) {
+}
+
+// WatchRemoteIdentities implements clustermesh.RemoteIdentityWatcher.
+func (d dummyRemoteIdentityWatcher) WatchRemoteIdentities(remoteName string, remoteID uint32, backend kvstore.BackendOperations, cachedPrefix bool) (allocator.RemoteIDCache, error) {
+	return &cache.NoopRemoteIDCache{}, nil
+}
+
+var _ clustermesh.RemoteIdentityWatcher = dummyRemoteIdentityWatcher{}
+
+type dummyClusterMeshMetrics struct{}
+
+// AddClusterMeshConfig implements clustermesh.ClusterMeshMetrics.
+func (dummyClusterMeshMetrics) AddClusterMeshConfig(mode string, maxClusters string) {}
+
+// DelClusterMeshConfig implements clustermesh.ClusterMeshMetrics.
+func (dummyClusterMeshMetrics) DelClusterMeshConfig(mode string, maxClusters string) {}
+
+var _ clustermesh.ClusterMeshMetrics = dummyClusterMeshMetrics{}

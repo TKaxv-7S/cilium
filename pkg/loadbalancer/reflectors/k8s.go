@@ -60,6 +60,8 @@ var K8sReflectorCell = cell.Module(
 
 	cell.Provide(provideK8sReflector),
 	cell.ProvidePrivate(newEventStream),
+	cell.Provide(newClusterMeshEndpointSliceObserver),
+	cell.ProvidePrivate(newClusterMeshEndpointSliceEvents),
 	cell.Invoke(func(_ K8sReflectorRegistered) {}),
 )
 
@@ -983,7 +985,7 @@ func serviceEvents(cs client.Clientset, cfg k8s.ConfigParams) (stream.Observable
 		}), nil
 }
 
-func newEventStream(log *slog.Logger, cs client.Clientset, cfg k8s.ConfigParams) (stream.Observable[event], error) {
+func newEventStream(log *slog.Logger, cs client.Clientset, cfg k8s.ConfigParams, clusterMeshEvents clusterMeshEndpointSliceEvents) (stream.Observable[event], error) {
 	if !cs.IsEnabled() {
 		return stream.Empty[event](), nil
 	}
@@ -998,6 +1000,7 @@ func newEventStream(log *slog.Logger, cs client.Clientset, cfg k8s.ConfigParams)
 	return joinObservables(
 		svcEvents,
 		epsEvents,
+		clusterMeshEvents,
 	), nil
 }
 
