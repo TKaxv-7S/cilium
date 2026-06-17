@@ -710,4 +710,108 @@ func TestAutoDetectENINativeRoutingCIDR(t *testing.T) {
 		// Should NOT have been written since the config already has a value.
 		require.Nil(t, localNode.Local.IPv4NativeRoutingCIDR)
 	})
+
+	t.Run("accepts a native routing CIDR that is a subnet of the VPC CIDR", func(t *testing.T) {
+		// Regression test: a native routing CIDR that is a subset of the VPC
+		// CIDR (e.g. a single availability-zone subnet) is a valid, supported
+		// configuration. It must not be rejected (which would call
+		// logging.Fatal and crash the agent on startup).
+		logger := hivetest.Logger(t)
+		localNodeStore := node.NewTestLocalNodeStore(node.LocalNode{})
+
+		primaryCIDR := netip.MustParsePrefix("192.168.0.0/16")
+		conf := &option.DaemonConfig{
+			IPv4NativeRoutingCIDR: cidr.MustParseCIDR("192.168.64.0/19"),
+		}
+		autoDetectENINativeRoutingCIDR(logger, primaryCIDR, localNodeStore, conf)
+
+		localNode, err := localNodeStore.Get(context.Background())
+		require.NoError(t, err)
+		// Should NOT have been written since the config already has a value.
+		require.Nil(t, localNode.Local.IPv4NativeRoutingCIDR)
+	})
+}
+
+func TestNativeRoutingCIDROverlapsVPC(t *testing.T) {
+	// Each case documents three behaviors:
+	//   original: ip.CoalesceCIDRs([native, vpc]) len==1 (pre-1ecc3722eb)
+	//   pr46220:  native.Bits() <= vpc.Bits() && native.Contains(vpc.Addr())
+	//             (1ecc3722eb, superset-only; this is the regression)
+	//   want:     the current native.Contains(vpc) || vpc.Contains(native)
+	// The "original" and "pr46220" fields document how the older implementations
+	// behaved on the same input; only "want" is asserted.
+	tests := []struct {
+		name     string
+		native   string
+		vpc      string
+		original bool
+		pr46220  bool
+		want     bool
+	}{
+		{
+			// The configuration the l7-perf / scale-test-egw workflows use: the
+			// native CIDR is a single-AZ subnet of the VPC. This is the case
+			// PR #46220 regressed.
+			name:     "native is a subnet of the VPC",
+			native:   "192.168.64.0/19",
+			vpc:      "192.168.0.0/16",
+			original: true,
+			pr46220:  false,
+			want:     true,
+		},
+		{
+			name:     "native is a supernet of the VPC",
+			native:   "10.0.0.0/8",
+			vpc:      "10.0.0.0/16",
+			original: true,
+			pr46220:  true,
+			want:     true,
+		},
+		{
+			name:     "native equals the VPC",
+			native:   "10.0.0.0/16",
+			vpc:      "10.0.0.0/16",
+			original: true,
+			pr46220:  true,
+			want:     true,
+		},
+		{
+			name:     "native and VPC are disjoint and far apart",
+			native:   "10.0.0.0/8",
+			vpc:      "192.168.0.0/16",
+			original: false,
+			pr46220:  false,
+			want:     false,
+		},
+		{
+			// Two same-size adjacent CIDRs coalesce into a single /16 range, so
+			// the original CoalesceCIDRs check accepted them even though neither
+			// contains the other. The current check rejects them on purpose: such
+			// a native CIDR does not cover the VPC pod space and should not be
+			// trusted as the no-masquerade range. This is the one input where the
+			// current behavior intentionally differs from the original.
+			name:     "native and VPC are same-size adjacent siblings",
+			native:   "192.168.0.0/17",
+			vpc:      "192.168.128.0/17",
+			original: true,
+			pr46220:  false,
+			want:     false,
+		},
+		{
+			name:     "native and VPC are same-size and non-adjacent",
+			native:   "192.168.0.0/19",
+			vpc:      "192.168.96.0/19",
+			original: false,
+			pr46220:  false,
+			want:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			native := netip.MustParsePrefix(tt.native).Masked()
+			vpc := netip.MustParsePrefix(tt.vpc).Masked()
+			require.Equal(t, tt.want, nativeRoutingCIDROverlapsVPC(native, vpc))
+		})
+	}
 }

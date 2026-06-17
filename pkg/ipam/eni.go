@@ -172,15 +172,14 @@ func autoDetectENINativeRoutingCIDR(
 ) {
 	if nativeCIDR := conf.IPv4NativeRoutingCIDR; nativeCIDR != nil {
 		native, ok := netipx.FromStdIPNet(nativeCIDR.IPNet)
-		// Validate that the configured native routing CIDR contains the VPC CIDR.
-		if ok && native.Bits() <= primaryCIDR.Bits() && native.Contains(primaryCIDR.Addr()) {
+		if ok && nativeRoutingCIDROverlapsVPC(native, primaryCIDR) {
 			logger.Info(
-				"Native routing CIDR contains VPC CIDR, ignoring autodetected VPC CIDR.",
+				"Native routing CIDR overlaps VPC CIDR, ignoring autodetected VPC CIDR.",
 				logfields.VPCCIDR, primaryCIDR,
 				option.IPv4NativeRoutingCIDR, nativeCIDR,
 			)
 		} else {
-			logging.Fatal(logger, "Configured native routing CIDR does not contain VPC CIDR",
+			logging.Fatal(logger, "Configured native routing CIDR does not overlap VPC CIDR",
 				logfields.VPCCIDR, primaryCIDR,
 				option.IPv4NativeRoutingCIDR, nativeCIDR,
 			)
@@ -195,6 +194,33 @@ func autoDetectENINativeRoutingCIDR(
 	localNodeStore.Update(func(n *node.LocalNode) {
 		n.Local.IPv4NativeRoutingCIDR = cidr.NewCIDR(netipx.PrefixIPNet(primaryCIDR))
 	})
+}
+
+// nativeRoutingCIDROverlapsVPC reports whether the configured native routing
+// CIDR and the VPC primary CIDR overlap, i.e. one is contained within the
+// other. Because CIDRs are laminar (two prefixes are either nested or
+// disjoint, never partially overlapping), checking containment in either
+// direction accepts exactly the set of configurations the native routing CIDR
+// is meant to describe: the VPC CIDR, a subnet of it (e.g. a single
+// availability-zone subnet, used to masquerade cross-subnet traffic), or a
+// supernet of it. Fully disjoint CIDRs are rejected.
+//
+// History of this validation:
+//   - Original (3345ce1bc8): ip.CoalesceCIDRs([]*net.IPNet{native, vpc}) with
+//     len(ranges)==1. CoalesceCIDRs accepted not only nested CIDRs but also two
+//     same-size, adjacent CIDRs (e.g. two /17s that merge into a /16), since
+//     those coalesce into a single range even though neither contains the
+//     other.
+//   - PR #46220 (1ecc3722eb): native.Bits() <= vpc.Bits() && native.Contains(
+//     vpc.Addr()), which only accepted a native CIDR that is a superset of the
+//     VPC CIDR. This rejected the legitimate subnet case and crashed the agent.
+//   - Current: native.Contains(vpc) || vpc.Contains(native). This accepts the
+//     subnet, supernet and equal cases (every overlapping configuration) and,
+//     unlike the original, deliberately rejects same-size adjacent CIDRs, which
+//     do not cover the VPC pod space and should not be trusted as the
+//     no-masquerade range.
+func nativeRoutingCIDROverlapsVPC(native, vpc netip.Prefix) bool {
+	return native.Contains(vpc.Addr()) || vpc.Contains(native.Addr())
 }
 
 // deriveENIVpcCIDR extracts the VPC primary CIDR from the first ENI in the
