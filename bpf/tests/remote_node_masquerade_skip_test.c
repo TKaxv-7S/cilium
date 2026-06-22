@@ -46,9 +46,6 @@ CHECK("tc", "nat4_remote_node_masquerade_skipped_test")
 int test_nat4_remote_node_masquerade_skipped(__maybe_unused struct __ctx_buff *ctx)
 {
     struct snat_v4_args *args = AUX(snat_v4_args);
-    struct iphdr ip4 = {
-    .protocol = IPPROTO_TCP,
-    };
     fraginfo_t fraginfo = 0;
     int l4_off = 0;
     int ret;
@@ -80,7 +77,7 @@ int test_nat4_remote_node_masquerade_skipped(__maybe_unused struct __ctx_buff *c
      * and TUNNEL_MODE undefined.
      * Expect NAT_PUNT_TO_STACK and target.addr to be 0.
      */
-    ret = snat_v4_needs_masquerade(ctx, &ip4, fraginfo, l4_off);
+    ret = snat_v4_needs_masquerade(ctx, fraginfo, l4_off);
     assert(ret == NAT_PUNT_TO_STACK);
     assert(args->target.addr == 0); /* Masquerade address should NOT be set */
 

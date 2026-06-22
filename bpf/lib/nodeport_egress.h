@@ -375,7 +375,7 @@ static __always_inline int nodeport_snat_fwd_ipv4(struct __ctx_buff *ctx,
 	    nodeport_has_nat_conflict_ipv4(ctx, ip4, &args->target))
 		goto apply_snat;
 
-	ret = snat_v4_needs_masquerade(ctx, ip4, fraginfo, l4_off);
+	ret = snat_v4_needs_masquerade(ctx, fraginfo, l4_off);
 	if (IS_ERR(ret))
 		goto out;
 
