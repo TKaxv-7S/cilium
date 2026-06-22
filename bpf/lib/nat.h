@@ -623,12 +623,12 @@ static __always_inline void snat_v4_init_tuple(const struct iphdr *ip4,
  * error code (distinct from NAT_PUNT_TO_STACK).
  */
 static __always_inline int
-snat_v4_needs_masquerade(struct __ctx_buff *ctx __maybe_unused,
-			 struct ipv4_ct_tuple *tuple __maybe_unused,
-			 struct iphdr *ip4 __maybe_unused,
-			 fraginfo_t fraginfo __maybe_unused,
-			 int l4_off __maybe_unused,
-			 struct ipv4_nat_target *target __maybe_unused)
+__snat_v4_needs_masquerade(struct __ctx_buff *ctx __maybe_unused,
+			   struct ipv4_ct_tuple *tuple __maybe_unused,
+			   struct iphdr *ip4 __maybe_unused,
+			   fraginfo_t fraginfo __maybe_unused,
+			   int l4_off __maybe_unused,
+			   struct ipv4_nat_target *target __maybe_unused)
 {
 	const struct endpoint_info *local_ep __maybe_unused;
 	const struct remote_endpoint_info *remote_ep __maybe_unused;
@@ -789,6 +789,25 @@ snat_v4_needs_masquerade(struct __ctx_buff *ctx __maybe_unused,
 #endif /*ENABLE_MASQUERADE_IPV4 && IS_BPF_HOST */
 
 	return NAT_PUNT_TO_STACK;
+}
+
+/* Store struct ipv6_ct_tuple and struct ipv6_nat_target objects in maps to
+ * optimize stack usage.
+ */
+struct snat_v4_args {
+	struct ipv4_ct_tuple tuple;
+	struct ipv4_nat_target target;
+};
+
+DEFINE_AUX(struct snat_v4_args, snat_v4_args);
+
+static __always_inline int
+snat_v4_needs_masquerade(struct __ctx_buff *ctx, struct iphdr *ip4, fraginfo_t fraginfo,
+			 int l4_off)
+{
+	struct snat_v4_args *args = AUX(snat_v4_args);
+
+	return __snat_v4_needs_masquerade(ctx, &args->tuple, ip4, fraginfo, l4_off, &args->target);
 }
 
 static __always_inline __maybe_unused int
