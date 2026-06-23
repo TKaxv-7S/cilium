@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"slices"
 	"strconv"
 
 	"github.com/cilium/ebpf"
@@ -61,7 +60,7 @@ type PerClusterCTMapper interface {
 
 	// GetClusterCTMaps returns the per-cluster maps for each known cluster ID.
 	// The returned maps need to be opened by the caller.
-	GetAllClusterCTMaps() []MapPair
+	GetAllClusterCTMaps() []MapPairWithMeta
 }
 
 // GetClusterCTMaps returns the per-cluster maps for the given cluster ID. The
@@ -197,24 +196,19 @@ func (gm *perClusterCTMaps) DeleteClusterCTMaps(clusterID uint32) error {
 	)
 }
 
-func (gm *perClusterCTMaps) GetAllClusterCTMaps() []MapPair {
+func (gm *perClusterCTMaps) GetAllClusterCTMaps() []MapPairWithMeta {
 	gm.Lock()
 	defer gm.Unlock()
 
-	var maps []*Map
+	var pairs []MapPairWithMeta
 	for clusterID := range gm.clusterIDs {
-		gm.foreach(func(om *PerClusterCTMap) error {
-			maps = append(maps, om.newInnerMap(clusterID))
-			return nil
-		})
-	}
-
-	// Split into pairs
-	pairs := make([]MapPair, 0, len(maps)/2)
-	for p := range slices.Chunk(maps, 2) {
-		pairs = append(pairs, MapPair{
-			TCP: p[0],
-			Any: p[1],
+		gm.foreachPair(func(tcp, any *PerClusterCTMap) {
+			pairs = append(pairs, MapPairWithMeta{
+				MapPair: MapPair{
+					TCP: tcp.newInnerMap(clusterID),
+					Any: any.newInnerMap(clusterID),
+				},
+			})
 		})
 	}
 
@@ -266,6 +260,14 @@ func (gm *perClusterCTMaps) foreach(fn func(om *PerClusterCTMap) error) error {
 	}
 
 	return errors.Join(errs...)
+}
+
+func (gm *perClusterCTMaps) foreachPair(fn func(tcp, any *PerClusterCTMap)) {
+	for _, pair := range [][2]*PerClusterCTMap{{gm.tcp4, gm.any4}, {gm.tcp6, gm.any6}} {
+		if pair[0] != nil && pair[1] != nil {
+			fn(pair[0], pair[1])
+		}
+	}
 }
 
 func newPerClusterCTMap(m mapType) *PerClusterCTMap {
